@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-// Integration tests must use supplydesk_test, never the development database.
 loadDotEnv({ path: resolve(process.cwd(), "../.env") });
 
 const configuredDatabaseUrl = process.env.DATABASE_URL;
@@ -27,7 +26,10 @@ try {
   throw new Error("DATABASE_URL is not a valid PostgreSQL URL.");
 }
 
-if (parsedTestDatabaseUrl.pathname.replace(/^\/+/, "") !== "supplydesk_test") {
+if (
+  parsedTestDatabaseUrl.pathname.replace(/^\/+/, "") !==
+  "supplydesk_test"
+) {
   throw new Error(
     "Safety check failed: tests must use supplydesk_test.",
   );
@@ -69,15 +71,15 @@ async function signIn(
 
   expect(csrfResponse.status).toBe(200);
 
-  const csrfToken = String(
+  const initialCsrfToken = String(
     csrfResponse.body?.data?.csrfToken ?? "",
   );
 
-  expect(csrfToken.length).toBeGreaterThan(20);
+  expect(initialCsrfToken.length).toBeGreaterThan(20);
 
   const loginResponse = await agent
     .post("/api/auth/login")
-    .set("X-CSRF-Token", csrfToken)
+    .set("X-CSRF-Token", initialCsrfToken)
     .send({ email, password });
 
   expect(loginResponse.status).toBe(200);
@@ -119,11 +121,16 @@ describe("SupplyDesk API integration tests", () => {
     await pool.end();
   });
 
-  it("serves the health check and protects business APIs", async () => {
+  it("serves health checks and protects business APIs", async () => {
     const health = await request(app).get("/api/health");
 
     expect(health.status).toBe(200);
     expect(health.body.status).toBe("ok");
+
+    const readiness = await request(app).get("/api/health/ready");
+
+    expect(readiness.status).toBe(200);
+    expect(readiness.body.database).toBe("connected");
 
     const anonymousAgent = request.agent(app);
     const privateResponse = await anonymousAgent.get("/api/products");
@@ -136,7 +143,6 @@ describe("SupplyDesk API integration tests", () => {
 
   it("rejects invalid credentials without revealing whether an account exists", async () => {
     const anonymousAgent = request.agent(app);
-
     const csrfResponse = await anonymousAgent.get("/api/auth/csrf");
     const token = String(csrfResponse.body?.data?.csrfToken ?? "");
 
@@ -149,14 +155,16 @@ describe("SupplyDesk API integration tests", () => {
       });
 
     expect(loginResponse.status).toBe(401);
-    expect(loginResponse.body.error.code).toBe("INVALID_CREDENTIALS");
+    expect(loginResponse.body.error.code).toBe(
+      "INVALID_CREDENTIALS",
+    );
     expect(loginResponse.body.error.message).toBe(
       "Email or password is incorrect.",
     );
   });
 
   it("allows administrators to provision additional accounts", async () => {
-    const newEmail = `manager-${suffix}@example.com`;
+    const newEmail = `created-manager-${suffix}@example.com`;
     const newPassword = `SupplyDesk-${suffix}-Manager!`;
 
     const response = await adminPost("/api/auth/users", {
@@ -174,11 +182,13 @@ describe("SupplyDesk API integration tests", () => {
       [newEmail],
     );
 
-    expect(stored.rows[0].password_hash.startsWith("scrypt$")).toBe(true);
+    expect(stored.rows[0].password_hash.startsWith("scrypt$")).toBe(
+      true,
+    );
     expect(stored.rows[0].password_hash).not.toContain(newPassword);
   });
 
-  it("requires CSRF tokens for mutations", async () => {
+  it("requires a CSRF token for state-changing requests", async () => {
     const response = await adminAgent
       .post("/api/products")
       .send({
@@ -281,6 +291,58 @@ describe("SupplyDesk API integration tests", () => {
     ).toBe(true);
   });
 
+  it("allows managers to modify business data but not manage accounts", async () => {
+    const managerEmail = `manager-permissions-${suffix}@example.com`;
+    const managerPassword = `SupplyDesk-${suffix}-ManagerAccess!`;
+
+    await pool.query(
+      `INSERT INTO users (email, password_hash, role)
+       VALUES ($1, $2, 'manager')`,
+      [managerEmail, await hashPassword(managerPassword)],
+    );
+
+    const managerAgent = request.agent(app);
+    const session = await signIn(
+      managerAgent,
+      managerEmail,
+      managerPassword,
+    );
+
+    expect(session.user.role).toBe("manager");
+
+    const readResponse = await managerAgent.get("/api/products");
+    expect(readResponse.status).toBe(200);
+
+    const productResponse = await managerAgent
+      .post("/api/products")
+      .set("X-CSRF-Token", session.csrfToken)
+      .send({
+        sku: `MANAGER-${suffix}`,
+        name: `Manager Created Product ${suffix}`,
+        category: "Testing",
+        quantity: 0,
+        reorderPoint: 0,
+        unitCost: 2.5,
+        location: "Manager Test Shelf",
+      });
+
+    expect(productResponse.status).toBe(201);
+
+    const userCreationResponse = await managerAgent
+      .post("/api/auth/users")
+      .set("X-CSRF-Token", session.csrfToken)
+      .send({
+        email: `unauthorized-${suffix}@example.com`,
+        password: `SupplyDesk-${suffix}-Unauthorized!`,
+        role: "viewer",
+      });
+
+    expect(userCreationResponse.status).toBe(403);
+    expect(userCreationResponse.body.error.code).toBe(
+      "INSUFFICIENT_PERMISSIONS",
+    );
+  });
+
   it("allows viewers to read but rejects their write requests", async () => {
     const viewerEmail = `viewer-${suffix}@example.com`;
     const viewerPassword = `SupplyDesk-${suffix}-Viewer!`;
@@ -292,20 +354,18 @@ describe("SupplyDesk API integration tests", () => {
     );
 
     const viewerAgent = request.agent(app);
-
-    const viewerSession = await signIn(
+    const session = await signIn(
       viewerAgent,
       viewerEmail,
       viewerPassword,
     );
 
     const readResponse = await viewerAgent.get("/api/products");
-
     expect(readResponse.status).toBe(200);
 
     const writeResponse = await viewerAgent
       .post("/api/products")
-      .set("X-CSRF-Token", viewerSession.csrfToken)
+      .set("X-CSRF-Token", session.csrfToken)
       .send({
         sku: `VIEWER-${suffix}`,
         name: "Viewer write must be rejected",
@@ -322,6 +382,80 @@ describe("SupplyDesk API integration tests", () => {
     );
   });
 
+  it("immediately denies access to a deactivated account", async () => {
+    const disabledEmail = `disabled-${suffix}@example.com`;
+    const disabledPassword = `SupplyDesk-${suffix}-Disabled!`;
+
+    const insertResult = await pool.query<{ id: string }>(
+      `INSERT INTO users (email, password_hash, role)
+       VALUES ($1, $2, 'viewer')
+       RETURNING id`,
+      [disabledEmail, await hashPassword(disabledPassword)],
+    );
+
+    const userId = insertResult.rows[0].id;
+    const disabledAgent = request.agent(app);
+
+    const session = await signIn(
+      disabledAgent,
+      disabledEmail,
+      disabledPassword,
+    );
+
+    expect(session.user.id).toBe(userId);
+
+    await pool.query(
+      "UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1",
+      [userId],
+    );
+
+    const protectedResponse = await disabledAgent.get("/api/products");
+
+    expect(protectedResponse.status).toBe(401);
+    expect(protectedResponse.body.error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
+  });
+
+  it("invalidates the session after logout", async () => {
+    const logoutEmail = `logout-${suffix}@example.com`;
+    const logoutPassword = `SupplyDesk-${suffix}-Logout!`;
+
+    await pool.query(
+      `INSERT INTO users (email, password_hash, role)
+       VALUES ($1, $2, 'viewer')`,
+      [logoutEmail, await hashPassword(logoutPassword)],
+    );
+
+    const logoutAgent = request.agent(app);
+    const session = await signIn(
+      logoutAgent,
+      logoutEmail,
+      logoutPassword,
+    );
+
+    const beforeLogout = await logoutAgent.get("/api/products");
+    expect(beforeLogout.status).toBe(200);
+
+    const logoutResponse = await logoutAgent
+      .post("/api/auth/logout")
+      .set("X-CSRF-Token", session.csrfToken)
+      .send({});
+
+    expect(logoutResponse.status).toBe(200);
+    expect(logoutResponse.body.data.success).toBe(true);
+
+    const afterLogout = await logoutAgent.get("/api/auth/me");
+
+    expect(afterLogout.status).toBe(401);
+    expect(afterLogout.body.error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
+
+    const protectedAfterLogout = await logoutAgent.get("/api/products");
+    expect(protectedAfterLogout.status).toBe(401);
+  });
+
   it("supports partial receipts and rejects receiving too many units", async () => {
     const supplierResponse = await adminPost("/api/suppliers", {
       name: `Integration Test Supplier ${suffix}`,
@@ -334,9 +468,7 @@ describe("SupplyDesk API integration tests", () => {
 
     expect([200, 201]).toContain(supplierResponse.status);
 
-    const supplier = unwrap<{ id: string }>(
-      supplierResponse.body,
-    );
+    const supplier = unwrap<{ id: string }>(supplierResponse.body);
 
     const productResponse = await adminPost("/api/products", {
       sku: `TEST-PO-${suffix}`,
@@ -350,9 +482,7 @@ describe("SupplyDesk API integration tests", () => {
 
     expect(productResponse.status).toBe(201);
 
-    const product = unwrap<{ id: string }>(
-      productResponse.body,
-    );
+    const product = unwrap<{ id: string }>(productResponse.body);
 
     const orderResponse = await adminPost("/api/purchase-orders", {
       supplierId: supplier.id,
