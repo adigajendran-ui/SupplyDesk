@@ -1,10 +1,9 @@
-
 import { config as loadDotEnv } from "dotenv";
 import { resolve } from "node:path";
 import request from "supertest";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-// Load the project's environment before importing the app or database pool.
+// Integration tests must use supplydesk_test, never the development database.
 loadDotEnv({ path: resolve(process.cwd(), "../.env") });
 
 const configuredDatabaseUrl = process.env.DATABASE_URL;
@@ -15,7 +14,6 @@ if (!configuredDatabaseUrl) {
   );
 }
 
-// Always direct this suite to supplydesk_test, never supplydesk.
 const testDatabaseUrl = configuredDatabaseUrl.replace(
   /\/supplydesk(?:_test)?(?=\?|$)/,
   "/supplydesk_test",
@@ -29,65 +27,172 @@ try {
   throw new Error("DATABASE_URL is not a valid PostgreSQL URL.");
 }
 
-const testDatabaseName = parsedTestDatabaseUrl.pathname.replace(/^\/+/, "");
-
-if (
-  testDatabaseName !== "supplydesk_test" ||
-  !testDatabaseUrl.includes("supplydesk_test")
-) {
+if (parsedTestDatabaseUrl.pathname.replace(/^\/+/, "") !== "supplydesk_test") {
   throw new Error(
-    "Safety check failed: automated tests must use the supplydesk_test database.",
+    "Safety check failed: tests must use supplydesk_test.",
   );
 }
 
 process.env.DATABASE_URL = testDatabaseUrl;
+process.env.NODE_ENV = "test";
+process.env.SESSION_SECRET ??=
+  "test-only-session-secret-never-use-outside-automated-tests";
+process.env.FRONTEND_ORIGIN ??= "http://127.0.0.1:5173";
 
-// Dynamic imports ensure the database pool receives the test URL above.
 const { app } = await import("../src/app.js");
 const { pool } = await import("../src/db/pool.js");
+const { hashPassword } = await import("../src/auth/password.js");
 
 const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const adminEmail = `admin-${suffix}@example.com`;
+const adminPassword = `SupplyDesk-${suffix}-Strong!`;
+
+type TestAgent = ReturnType<typeof request.agent>;
+
+let adminAgent: TestAgent;
+let adminCsrfToken = "";
 
 function unwrap<T>(body: unknown): T {
   const envelope = body as { data?: T } | null;
   return (envelope?.data ?? body) as T;
 }
 
-function expectCreated(status: number): void {
-  expect([200, 201]).toContain(status);
+async function signIn(
+  agent: TestAgent,
+  email: string,
+  password: string,
+): Promise<{
+  csrfToken: string;
+  user: { id: string; email: string; role: string };
+}> {
+  const csrfResponse = await agent.get("/api/auth/csrf");
+
+  expect(csrfResponse.status).toBe(200);
+
+  const csrfToken = String(
+    csrfResponse.body?.data?.csrfToken ?? "",
+  );
+
+  expect(csrfToken.length).toBeGreaterThan(20);
+
+  const loginResponse = await agent
+    .post("/api/auth/login")
+    .set("X-CSRF-Token", csrfToken)
+    .send({ email, password });
+
+  expect(loginResponse.status).toBe(200);
+
+  return loginResponse.body.data;
 }
 
-type TestProduct = {
-  id: string;
-  sku: string;
-  quantity: number;
-};
-
-type TestSupplier = {
-  id: string;
-};
-
-type TestPurchaseOrder = {
-  id: string;
-  status: string;
-  items: {
-    id: string;
-    productId: string;
-    quantityReceived: number;
-  }[];
-};
+function adminPost(path: string, body: unknown) {
+  return adminAgent
+    .post(path)
+    .set("X-CSRF-Token", adminCsrfToken)
+    .send(body);
+}
 
 describe("SupplyDesk API integration tests", () => {
+  beforeAll(async () => {
+    const passwordHash = await hashPassword(adminPassword);
+
+    await pool.query(
+      `INSERT INTO users (email, password_hash, role)
+       VALUES ($1, $2, 'admin')`,
+      [adminEmail, passwordHash],
+    );
+
+    adminAgent = request.agent(app);
+
+    const session = await signIn(
+      adminAgent,
+      adminEmail,
+      adminPassword,
+    );
+
+    adminCsrfToken = session.csrfToken;
+
+    expect(session.user.role).toBe("admin");
+  });
+
   afterAll(async () => {
     await pool.end();
   });
 
-  it("serves the API health check", async () => {
-    const response = await request(app).get("/api/health");
+  it("serves the health check and protects business APIs", async () => {
+    const health = await request(app).get("/api/health");
 
-    expect(response.status).toBe(200);
-    expect(response.body.status).toBe("ok");
-    expect(response.body.service).toBe("supplydesk-api");
+    expect(health.status).toBe(200);
+    expect(health.body.status).toBe("ok");
+
+    const anonymousAgent = request.agent(app);
+    const privateResponse = await anonymousAgent.get("/api/products");
+
+    expect(privateResponse.status).toBe(401);
+    expect(privateResponse.body.error.code).toBe(
+      "AUTHENTICATION_REQUIRED",
+    );
+  });
+
+  it("rejects invalid credentials without revealing whether an account exists", async () => {
+    const anonymousAgent = request.agent(app);
+
+    const csrfResponse = await anonymousAgent.get("/api/auth/csrf");
+    const token = String(csrfResponse.body?.data?.csrfToken ?? "");
+
+    const loginResponse = await anonymousAgent
+      .post("/api/auth/login")
+      .set("X-CSRF-Token", token)
+      .send({
+        email: adminEmail,
+        password: "definitely-the-wrong-password",
+      });
+
+    expect(loginResponse.status).toBe(401);
+    expect(loginResponse.body.error.code).toBe("INVALID_CREDENTIALS");
+    expect(loginResponse.body.error.message).toBe(
+      "Email or password is incorrect.",
+    );
+  });
+
+  it("allows administrators to provision additional accounts", async () => {
+    const newEmail = `manager-${suffix}@example.com`;
+    const newPassword = `SupplyDesk-${suffix}-Manager!`;
+
+    const response = await adminPost("/api/auth/users", {
+      email: newEmail,
+      password: newPassword,
+      role: "manager",
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.email).toBe(newEmail);
+    expect(response.body.data.role).toBe("manager");
+
+    const stored = await pool.query<{ password_hash: string }>(
+      "SELECT password_hash FROM users WHERE email = $1",
+      [newEmail],
+    );
+
+    expect(stored.rows[0].password_hash.startsWith("scrypt$")).toBe(true);
+    expect(stored.rows[0].password_hash).not.toContain(newPassword);
+  });
+
+  it("requires CSRF tokens for mutations", async () => {
+    const response = await adminAgent
+      .post("/api/products")
+      .send({
+        sku: `CSRF-${suffix}`,
+        name: "CSRF protection probe",
+        category: "Testing",
+        quantity: 0,
+        reorderPoint: 0,
+        unitCost: 1,
+        location: "Test Shelf",
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe("CSRF_TOKEN_REQUIRED");
   });
 
   it("creates products, rejects duplicate SKUs, and protects stock levels", async () => {
@@ -101,53 +206,63 @@ describe("SupplyDesk API integration tests", () => {
       location: "Test Shelf",
     };
 
-    const createdResponse = await request(app)
-      .post("/api/products")
-      .send(productInput);
+    const createdResponse = await adminPost(
+      "/api/products",
+      productInput,
+    );
 
-    expectCreated(createdResponse.status);
+    expect(createdResponse.status).toBe(201);
 
-    const product = unwrap<TestProduct>(createdResponse.body);
+    const product = unwrap<{
+      id: string;
+      quantity: number;
+    }>(createdResponse.body);
+
     expect(product.id).toBeTruthy();
 
-    // SKU uniqueness should be enforced by the API/database.
-    const duplicateResponse = await request(app)
-      .post("/api/products")
-      .send(productInput);
+    const duplicateResponse = await adminPost(
+      "/api/products",
+      productInput,
+    );
 
-    expect([400, 409, 422]).toContain(duplicateResponse.status);
+    expect(duplicateResponse.status).toBe(409);
 
-    // A stock reduction that would make inventory negative must be rejected.
-    const negativeStockResponse = await request(app)
-      .post(`/api/products/${product.id}/adjustments`)
-      .send({
+    const negativeStockResponse = await adminPost(
+      `/api/products/${product.id}/adjustments`,
+      {
         delta: -4,
         reason: "Integration test: reject negative inventory",
-        });
+      },
+    );
 
     expect(negativeStockResponse.status).toBe(409);
+    expect(negativeStockResponse.body.error.code).toBe(
+      "INSUFFICIENT_STOCK",
+    );
 
-    // A valid stock adjustment should succeed.
-    const adjustmentResponse = await request(app)
-      .post(`/api/products/${product.id}/adjustments`)
-      .send({
+    const adjustmentResponse = await adminPost(
+      `/api/products/${product.id}/adjustments`,
+      {
         delta: -2,
         reason: "Integration test: valid stock adjustment",
-        });
+      },
+    );
 
-    expectCreated(adjustmentResponse.status);
+    expect(adjustmentResponse.status).toBe(200);
 
-    const detailResponse = await request(app).get(
+    const detailResponse = await adminAgent.get(
       `/api/products/${product.id}`,
     );
 
     expect(detailResponse.status).toBe(200);
 
-    const updatedProduct = unwrap<TestProduct>(detailResponse.body);
-    expect(Number(updatedProduct.quantity)).toBe(1);
+    expect(
+      Number(
+        unwrap<{ quantity: number }>(detailResponse.body).quantity,
+      ),
+    ).toBe(1);
 
-    // The adjustment should appear in the product's stock movement history.
-    const movementsResponse = await request(app).get(
+    const movementsResponse = await adminAgent.get(
       `/api/products/${product.id}/movements?limit=100`,
     );
 
@@ -166,76 +281,119 @@ describe("SupplyDesk API integration tests", () => {
     ).toBe(true);
   });
 
-  it("supports partial receipts and rejects receiving too many units", async () => {
-    const supplierResponse = await request(app)
-      .post("/api/suppliers")
-      .send({
-        name: `Integration Test Supplier ${suffix}`,
-        contactName: "Test Contact",
-        email: `supplier-${suffix}@example.com`,
-        phone: null,
-        address: null,
-        notes: "Created by automated integration tests",
-      });
+  it("allows viewers to read but rejects their write requests", async () => {
+    const viewerEmail = `viewer-${suffix}@example.com`;
+    const viewerPassword = `SupplyDesk-${suffix}-Viewer!`;
 
-    expectCreated(supplierResponse.status);
+    await pool.query(
+      `INSERT INTO users (email, password_hash, role)
+       VALUES ($1, $2, 'viewer')`,
+      [viewerEmail, await hashPassword(viewerPassword)],
+    );
 
-    const supplier = unwrap<TestSupplier>(supplierResponse.body);
-    expect(supplier.id).toBeTruthy();
+    const viewerAgent = request.agent(app);
 
-    const productResponse = await request(app)
+    const viewerSession = await signIn(
+      viewerAgent,
+      viewerEmail,
+      viewerPassword,
+    );
+
+    const readResponse = await viewerAgent.get("/api/products");
+
+    expect(readResponse.status).toBe(200);
+
+    const writeResponse = await viewerAgent
       .post("/api/products")
+      .set("X-CSRF-Token", viewerSession.csrfToken)
       .send({
-        sku: `TEST-PO-${suffix}`,
-        name: `Purchase Order Test Product ${suffix}`,
+        sku: `VIEWER-${suffix}`,
+        name: "Viewer write must be rejected",
         category: "Testing",
         quantity: 0,
-        reorderPoint: 2,
-        unitCost: 7.5,
-        location: "Test Receiving",
+        reorderPoint: 0,
+        unitCost: 1,
+        location: "Test Shelf",
       });
 
-    expectCreated(productResponse.status);
+    expect(writeResponse.status).toBe(403);
+    expect(writeResponse.body.error.code).toBe(
+      "INSUFFICIENT_PERMISSIONS",
+    );
+  });
 
-    const product = unwrap<TestProduct>(productResponse.body);
+  it("supports partial receipts and rejects receiving too many units", async () => {
+    const supplierResponse = await adminPost("/api/suppliers", {
+      name: `Integration Test Supplier ${suffix}`,
+      contactName: "Test Contact",
+      email: `supplier-${suffix}@example.com`,
+      phone: null,
+      address: null,
+      notes: "Created by automated integration tests",
+    });
 
-    const orderResponse = await request(app)
-      .post("/api/purchase-orders")
-      .send({
-        supplierId: supplier.id,
-        expectedDate: null,
-        notes: "Automated purchasing integration test",
-        items: [
-          {
-            productId: product.id,
-            quantityOrdered: 8,
-            unitCost: 7.5,
-          },
-        ],
-      });
+    expect([200, 201]).toContain(supplierResponse.status);
 
-    expectCreated(orderResponse.status);
+    const supplier = unwrap<{ id: string }>(
+      supplierResponse.body,
+    );
 
-    const draft = unwrap<TestPurchaseOrder>(orderResponse.body);
-    expect(draft.id).toBeTruthy();
+    const productResponse = await adminPost("/api/products", {
+      sku: `TEST-PO-${suffix}`,
+      name: `Purchase Order Test Product ${suffix}`,
+      category: "Testing",
+      quantity: 0,
+      reorderPoint: 2,
+      unitCost: 7.5,
+      location: "Test Receiving",
+    });
+
+    expect(productResponse.status).toBe(201);
+
+    const product = unwrap<{ id: string }>(
+      productResponse.body,
+    );
+
+    const orderResponse = await adminPost("/api/purchase-orders", {
+      supplierId: supplier.id,
+      expectedDate: null,
+      notes: "Automated purchasing integration test",
+      items: [
+        {
+          productId: product.id,
+          quantityOrdered: 8,
+          unitCost: 7.5,
+        },
+      ],
+    });
+
+    expect([200, 201]).toContain(orderResponse.status);
+
+    const draft = unwrap<{
+      id: string;
+      status: string;
+      items: { id: string }[];
+    }>(orderResponse.body);
+
     expect(draft.status).toBe("draft");
     expect(draft.items).toHaveLength(1);
 
-    const placeResponse = await request(app).post(
+    const placeResponse = await adminPost(
       `/api/purchase-orders/${draft.id}/place`,
+      {},
     );
 
     expect(placeResponse.status).toBe(200);
 
-    const placedOrder = unwrap<TestPurchaseOrder>(placeResponse.body);
-    expect(placedOrder.status).toBe("ordered");
+    expect(
+      unwrap<{ status: string }>(placeResponse.body).status,
+    ).toBe("ordered");
 
     const orderItemId = draft.items[0].id;
 
-    // Receive 3 of the 8 ordered units.
-    const partialReceiptResponse = await request(app)
-      .post(`/api/purchase-orders/${draft.id}/receipts`)
-      .send({
+    const partialResponse = await adminPost(
+      `/api/purchase-orders/${draft.id}/receipts`,
+      {
         receiptReference: `TEST-PARTIAL-${suffix}`,
         notes: "Partial receipt test",
         items: [
@@ -244,19 +402,18 @@ describe("SupplyDesk API integration tests", () => {
             quantityReceived: 3,
           },
         ],
-      });
-
-    expectCreated(partialReceiptResponse.status);
-
-    const partialReceipt = unwrap<{ status: string }>(
-      partialReceiptResponse.body,
+      },
     );
-    expect(partialReceipt.status).toBe("partially_received");
 
-    // Five units remain. Receiving six more must be rejected.
-    const overReceiptResponse = await request(app)
-      .post(`/api/purchase-orders/${draft.id}/receipts`)
-      .send({
+    expect([200, 201]).toContain(partialResponse.status);
+
+    expect(
+      unwrap<{ status: string }>(partialResponse.body).status,
+    ).toBe("partially_received");
+
+    const overReceiptResponse = await adminPost(
+      `/api/purchase-orders/${draft.id}/receipts`,
+      {
         receiptReference: `TEST-OVER-${suffix}`,
         notes: "This receipt must be rejected",
         items: [
@@ -265,14 +422,14 @@ describe("SupplyDesk API integration tests", () => {
             quantityReceived: 6,
           },
         ],
-      });
+      },
+    );
 
     expect(overReceiptResponse.status).toBe(409);
 
-    // Receive the remaining five units.
-    const finalReceiptResponse = await request(app)
-      .post(`/api/purchase-orders/${draft.id}/receipts`)
-      .send({
+    const finalReceiptResponse = await adminPost(
+      `/api/purchase-orders/${draft.id}/receipts`,
+      {
         receiptReference: `TEST-FINAL-${suffix}`,
         notes: "Final receipt test",
         items: [
@@ -281,33 +438,35 @@ describe("SupplyDesk API integration tests", () => {
             quantityReceived: 5,
           },
         ],
-      });
-
-    expectCreated(finalReceiptResponse.status);
-
-    const finalReceipt = unwrap<{ status: string }>(
-      finalReceiptResponse.body,
+      },
     );
-    expect(finalReceipt.status).toBe("received");
 
-    // The eight received units must be reflected in inventory.
-    const finalProductResponse = await request(app).get(
+    expect([200, 201]).toContain(finalReceiptResponse.status);
+
+    expect(
+      unwrap<{ status: string }>(finalReceiptResponse.body).status,
+    ).toBe("received");
+
+    const finalProductResponse = await adminAgent.get(
       `/api/products/${product.id}`,
     );
 
     expect(finalProductResponse.status).toBe(200);
 
-    const finalProduct = unwrap<TestProduct>(finalProductResponse.body);
-    expect(Number(finalProduct.quantity)).toBe(8);
+    expect(
+      Number(
+        unwrap<{ quantity: number }>(finalProductResponse.body).quantity,
+      ),
+    ).toBe(8);
 
-    // Both successful receipts must be present in the order history.
-    const receiptsResponse = await request(app).get(
+    const receiptsResponse = await adminAgent.get(
       `/api/purchase-orders/${draft.id}/receipts`,
     );
 
     expect(receiptsResponse.status).toBe(200);
 
-    const receipts = unwrap<{ id: string }[]>(receiptsResponse.body);
-    expect(receipts).toHaveLength(2);
+    expect(
+      unwrap<{ id: string }[]>(receiptsResponse.body),
+    ).toHaveLength(2);
   });
 });

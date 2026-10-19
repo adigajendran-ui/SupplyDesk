@@ -1,6 +1,4 @@
-const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:3001/api"
-).replace(/\/+$/, "");
+import { API_BASE_URL, apiFetch } from "./authTransport";
 
 export type Product = {
   id: string;
@@ -146,9 +144,7 @@ export type PurchaseOrderDetail = PurchaseOrder & {
 
 export type PurchaseOrderQuery = {
   search?: string;
-  status?:
-    | "all"
-    | PurchaseOrderStatus;
+  status?: "all" | PurchaseOrderStatus;
   page?: number;
   limit?: number;
 };
@@ -234,7 +230,7 @@ async function request<T>(
   let response: Response;
 
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await apiFetch(`${API_BASE_URL}${path}`, {
       ...options,
       headers,
     });
@@ -306,7 +302,10 @@ export async function createProduct(
 }
 
 export async function getProductCategories(): Promise<string[]> {
-  const result = await request<{ data: string[] }>("/products/categories");
+  const result = await request<{ data: string[] }>(
+    "/products/categories",
+  );
+
   return result.data;
 }
 
