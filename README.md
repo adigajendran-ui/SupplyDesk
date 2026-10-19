@@ -1,181 +1,296 @@
 # SupplyDesk
 
-SupplyDesk is a full-stack inventory and purchasing management application built with React, TypeScript, Express, and PostgreSQL. It provides inventory visibility, stock movement history, supplier management, and a purchase-order workflow with partial receiving.
+[![SupplyDesk CI](https://github.com/adigajendran-ui/SupplyDesk/actions/workflows/ci.yml/badge.svg)](https://github.com/adigajendran-ui/SupplyDesk/actions/workflows/ci.yml)
 
-> **Project status:** Portfolio project in active development. Authentication and server-side authorization are not implemented yet. Do not expose this application to the public internet or use it for real business data until those controls and a production deployment configuration have been added and tested.
+**SupplyDesk** is a full-stack inventory and purchasing management application built with React, TypeScript, Express, and PostgreSQL. It helps users track stock levels, manage suppliers, create purchase orders, and record incoming stock through a validated purchasing workflow.
+
+> **Project status:** Portfolio project in development. Authentication, role-based access checks, and automated tests are implemented. Production deployment and additional security hardening remain outstanding.
 
 ## Features
 
-- **Inventory:** Create and search products, filter by stock status or category, paginate results, and update product details.
-- **Stock control:** Adjust inventory through a validated endpoint and record stock movements in a transactional ledger. Negative inventory is rejected.
-- **Dashboard and reports:** View inventory metrics, low-stock attention items, recent activity, and weekly activity.
-- **Supplier management:** Create and search suppliers, update their details, and activate or deactivate them.
-- **Purchasing:** Create draft purchase orders, place and cancel orders, receive items in multiple batches, and review receipt history. Over-receiving is rejected and accepted receipts update inventory in a transaction.
-- **Database migrations:** Versioned SQL migrations create the core inventory and purchasing schema.
-- **Automated checks:** Vitest and Supertest integration tests exercise the API against an isolated PostgreSQL test database. GitHub Actions runs frontend and backend checks on pushes and pull requests.
+- **Inventory management:** Create and search products, filter by category and stock status, paginate results, and update product details.
+- **Stock control:** Record inventory adjustments and maintain a stock movement ledger. Invalid adjustments that would create negative inventory are rejected.
+- **Dashboard and reports:** Review inventory metrics, low-stock products, recent activity, and weekly stock activity.
+- **Supplier management:** Create, search, update, activate, and deactivate suppliers.
+- **Purchasing workflow:** Create draft purchase orders, place or cancel orders, receive stock in multiple batches, and review receipt history.
+- **Transactional receiving:** Update inventory and record stock movements as part of the receipt workflow. Over-receiving is rejected.
+- **Authentication:** Sign in with an administrator-provisioned account and use PostgreSQL-backed sessions.
+- **Role-based access:** Administrators can provision accounts, managers can modify business data, and viewers have read-only access.
+- **Request protection:** Password hashing, login rate limiting, CSRF tokens, HTTP-only session cookies, security headers, and server-side permission checks.
+- **Automated tests:** Vitest and Supertest exercise authentication, permissions, inventory rules, and purchase-order receiving.
+- **Continuous integration:** GitHub Actions runs frontend and backend checks on pushes and pull requests.
 
 ## Technology stack
 
-- **Frontend:** React, TypeScript, Vite, and Lucide icons
-- **Backend:** Node.js, TypeScript, Express, Zod, Helmet, and `pg`
-- **Database:** PostgreSQL 17
-- **Local infrastructure:** Docker Compose
-- **Testing:** Vitest and Supertest
-- **CI:** GitHub Actions
+| Area | Technologies |
+|---|---|
+| Frontend | React, TypeScript, Vite, Lucide |
+| Backend | Node.js, TypeScript, Express |
+| Validation and security | Zod, Helmet, express-session, express-rate-limit |
+| Password security | Node.js `scrypt` password hashing |
+| Database | PostgreSQL 17 |
+| Local infrastructure | Docker Compose |
+| Testing | Vitest, Supertest |
+| CI | GitHub Actions |
 
 ## Project structure
 
 ```text
 SupplyDesk/
-├── .github/workflows/ci.yml     # Frontend and backend CI jobs
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── backend/
-│   ├── src/config/              # Environment validation
-│   ├── src/db/                  # PostgreSQL pool and migrations
-│   ├── src/routes/              # REST API routes
-│   └── tests/                   # API integration tests
+│   ├── src/
+│   │   ├── auth/
+│   │   ├── config/
+│   │   ├── db/
+│   │   │   └── migrations/
+│   │   ├── routes/
+│   │   ├── scripts/
+│   │   ├── app.ts
+│   │   └── server.ts
+│   └── tests/
 ├── frontend/
-│   └── src/                     # React application and API client
-├── .env.example                 # Local environment template
-├── compose.yaml                 # Local PostgreSQL service
+│   └── src/
+│       ├── AuthGate.tsx
+│       ├── WorkflowPages.tsx
+│       ├── api.ts
+│       └── auth.ts
+├── .env.example
+├── .gitignore
+├── compose.yaml
 └── README.md
 ```
 
 ## Prerequisites
 
-Install the following before starting:
+Install:
 
 - Git
 - Node.js 24.x and npm
-- Docker Desktop with the Docker Compose plugin
+- Docker Desktop with Docker Compose
 
-The commands below use Windows PowerShell. The app's local defaults are API `http://127.0.0.1:3001` and frontend `http://localhost:5173`.
+The following instructions use Windows PowerShell.
 
-## Local setup (Windows PowerShell)
+## Local setup
 
-### 1. Get the code
-
-Clone your repository after publishing it to GitHub, or open the existing project folder:
+### 1. Clone the repository
 
 ```powershell
-git clone <YOUR_GITHUB_REPOSITORY_URL>
+git clone https://github.com/adigajendran-ui/SupplyDesk.git
+
 Set-Location SupplyDesk
 ```
 
-Replace `<YOUR_GITHUB_REPOSITORY_URL>` with your repository's actual URL. If you already have the folder, `Set-Location` to that folder instead.
+If the project already exists on your computer, open its existing folder instead.
 
-### 2. Create your local environment file
+### 2. Configure environment variables
 
-From the project root:
+Create your local environment file:
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-Set `POSTGRES_PASSWORD` to a strong **local development-only** password. Set the password in `DATABASE_URL` to the same value. For easier URI handling, an alphanumeric password avoids needing to URL-encode reserved characters. Keep `.env` private; it is intentionally excluded from Git.
+Set a strong local PostgreSQL password. Use the same username, password, and database name consistently in `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and `DATABASE_URL`.
 
-The example file includes:
+Set `SESSION_SECRET` to a random secret generated by Node.js:
 
-- `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` for the local PostgreSQL container
-- `DATABASE_URL` for the backend connection
-- `PORT`, `NODE_ENV`, and `FRONTEND_ORIGIN` for the API
+```powershell
+node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"
+```
 
-If you change the database name or username, make the corresponding values in `DATABASE_URL` consistent.
+Copy the generated value into `.env`. Keep this secret private. Do not commit `.env` or reuse the example values as production credentials.
+
+For straightforward local URI handling, an alphanumeric PostgreSQL password avoids having to percent-encode reserved characters in `DATABASE_URL`.
 
 ### 3. Start PostgreSQL
 
-From the project root:
+Run this from the project root:
 
 ```powershell
 docker compose up -d --wait
 docker compose ps
 ```
 
-The database is published only on `127.0.0.1:5432`. Its persistent Docker volume is named `supplydesk_pg_data`. Do not run `docker compose down -v` unless you intentionally want to delete the local database volume and all data stored in it.
+PostgreSQL is published on `127.0.0.1:5432`. Data persists in the Docker volume `supplydesk_pg_data`.
+
+**Warning:** Do not run `docker compose down -v` unless you intentionally want to remove the local database volume and all data stored in it.
 
 ### 4. Install backend dependencies and apply migrations
 
 ```powershell
 Set-Location .\backend
+
 npm ci
 npm run db:migrate
 ```
 
-The migrations are stored under `backend/src/db/migrations`. The migration command uses `DATABASE_URL` from the root `.env` unless you override that environment variable in the current terminal.
+The versioned SQL migrations create the inventory, purchasing, and authentication tables. Migrations are additive; they do not reset existing business records.
 
-### 5. Start the API
+### 5. Create the initial administrator account
 
-In the backend terminal:
+The initial administrator is created through a command-line script rather than a public registration page.
+
+From `backend/`, run:
+
+```powershell
+$env:SUPPLYDESK_NEW_USER_EMAIL = Read-Host "Administrator email"
+
+$securePassword = Read-Host "Administrator password (12+ characters)" -AsSecureString
+$passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+
+try {
+    $env:SUPPLYDESK_NEW_USER_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
+    $env:SUPPLYDESK_NEW_USER_ROLE = "admin"
+
+    npm run auth:create-user
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Administrator creation failed."
+    }
+} finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
+
+    Remove-Item Env:SUPPLYDESK_NEW_USER_EMAIL -ErrorAction SilentlyContinue
+    Remove-Item Env:SUPPLYDESK_NEW_USER_PASSWORD -ErrorAction SilentlyContinue
+    Remove-Item Env:SUPPLYDESK_NEW_USER_ROLE -ErrorAction SilentlyContinue
+
+    Remove-Variable securePassword -ErrorAction SilentlyContinue
+}
+```
+
+Choose a strong, unique password. The script stores a password hash, not the plaintext password. If the email already exists, resolve that account rather than creating duplicates.
+
+### 6. Start the backend
+
+From `backend/`:
 
 ```powershell
 npm run dev
 ```
 
-Keep this terminal running. Useful endpoints:
+The API listens at:
 
-- `GET http://127.0.0.1:3001/api/health` — liveness check
-- `GET http://127.0.0.1:3001/api/health/ready` — PostgreSQL readiness check
+`http://127.0.0.1:3001`
 
-### 6. Start the frontend
+Health endpoints:
 
-Open a second PowerShell terminal, change to your project root, and then enter the frontend folder. For example, if your project is on the Desktop:
+- `GET /api/health` — confirms the API is responding.
+- `GET /api/health/ready` — confirms PostgreSQL connectivity.
+
+Keep the backend terminal running.
+
+### 7. Start the frontend
+
+Open a second terminal:
 
 ```powershell
 Set-Location "$HOME\OneDrive\Desktop\SupplyDesk\frontend"
+
 npm ci
-npm run dev
+npm run dev -- --host 127.0.0.1
 ```
 
-Adjust the path if you cloned the repository somewhere else. Open <http://localhost:5173> in your browser. By default, the frontend API client targets `http://127.0.0.1:3001/api`.
+Open:
 
-## Useful commands
+**http://127.0.0.1:5173**
 
-Run commands in the appropriate directory.
+Use the same hostname consistently in your browser during local development. The frontend API client defaults to `http://127.0.0.1:3001/api`, and the example environment uses `http://127.0.0.1:5173` as the allowed frontend origin.
 
-### Frontend (`frontend/`)
+Sign in with the administrator account you created in Step 5.
+
+## Authentication and authorization
+
+SupplyDesk uses server-side sessions stored in PostgreSQL. The application rotates the session on successful sign-in, hashes passwords with Node.js `scrypt`, validates CSRF tokens on state-changing requests, and rechecks whether the user account is active.
+
+| Role | Permissions |
+|---|---|
+| `admin` | Read and modify business data; provision user accounts |
+| `manager` | Read and modify business data; cannot provision accounts |
+| `viewer` | Read business data; write requests are rejected |
+
+Business endpoints require an authenticated session. The account-provisioning endpoint is restricted to administrators, and public registration is disabled.
+
+Key authentication routes:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/auth/csrf` | Obtain a CSRF token |
+| `POST` | `/api/auth/login` | Authenticate a user |
+| `GET` | `/api/auth/me` | Get the current user |
+| `POST` | `/api/auth/logout` | End the current session |
+| `POST` | `/api/auth/users` | Create an account as an administrator |
+
+## API overview
+
+The API is rooted at `/api`.
+
+| Area | Endpoint examples | Purpose |
+|---|---|---|
+| Health | `GET /health`, `GET /health/ready` | Liveness and database readiness |
+| Dashboard | `GET /dashboard/summary` | Inventory metrics and recent activity |
+| Products | `GET /products`, `POST /products`, `PATCH /products/:id` | Product listing and maintenance |
+| Stock | `POST /products/:id/adjustments`, `GET /products/:id/movements` | Validated stock changes and movement history |
+| Suppliers | `GET /suppliers`, `POST /suppliers`, `PATCH /suppliers/:id` | Supplier records and activation state |
+| Purchasing | `GET /purchase-orders`, `POST /purchase-orders`, `GET /purchase-orders/:id` | Order creation and lookup |
+| Order workflow | `POST /purchase-orders/:id/place`, `POST /purchase-orders/:id/cancel` | Place or cancel orders |
+| Receiving | `POST /purchase-orders/:id/receipts`, `GET /purchase-orders/:id/receipts` | Receive stock and view receipt history |
+
+Input validation and database constraints enforce rules such as unique SKUs, non-negative inventory, and receipt quantities that do not exceed outstanding order quantities.
+
+## Testing and development commands
+
+Run commands from the directory specified in each section.
+
+### Frontend
 
 ```powershell
-npm run dev
+npm ci
 npm run lint
 npm run build
 ```
 
-### Backend (`backend/`)
+### Backend
 
 ```powershell
-npm run dev
+npm ci
 npm test
 npm run typecheck
 npm run build
-npm run db:migrate
 ```
 
-## Running automated integration tests
+### Integration test database
 
-The integration suite must use the separate `supplydesk_test` database. The test file checks and rewrites the database URL to that database before importing the app and database pool; it will stop if it cannot verify the expected database name. Never point tests at a database containing data you need to keep.
+The integration suite requires a separate PostgreSQL database named `supplydesk_test`. It verifies the target database before importing the application and database pool. Never point the tests at a database containing data you need to preserve.
 
-Keep Docker Desktop and the PostgreSQL container running. Run the following from the **project root** if you have not created the test database yet:
+With Docker Desktop and the PostgreSQL container running, open PowerShell at the project root:
 
 ```powershell
 $dbUser = (docker exec supplydesk-postgres printenv POSTGRES_USER | Select-Object -First 1).Trim()
+
 if ([string]::IsNullOrWhiteSpace($dbUser)) {
-    throw "Could not read the PostgreSQL user from the running container."
+    throw "Could not read the PostgreSQL username."
 }
 
 $existsOutput = docker exec supplydesk-postgres psql -U $dbUser -d postgres -tA -c "SELECT 1 FROM pg_database WHERE datname = 'supplydesk_test';"
+
 if ($LASTEXITCODE -ne 0) {
     throw "Could not check whether supplydesk_test exists."
 }
 
 if ((@($existsOutput) -join "").Trim() -ne "1") {
     docker exec supplydesk-postgres psql -U $dbUser -d postgres -c "CREATE DATABASE supplydesk_test;"
+
     if ($LASTEXITCODE -ne 0) {
         throw "Could not create supplydesk_test."
     }
 }
 ```
 
-Apply migrations to `supplydesk_test` (not the development database). Run this in the **project root**:
+Apply the migrations to the test database:
 
 ```powershell
 $databaseLine = Get-Content .\.env |
@@ -187,6 +302,7 @@ if (-not $databaseLine) {
 }
 
 $databaseUrl = $databaseLine.Substring("DATABASE_URL=".Length).Trim().Trim('"').Trim("'")
+
 $testDatabaseUrl = $databaseUrl -replace '/supplydesk(?:_test)?(\?.*)?$', '/supplydesk_test$1'
 
 if ($testDatabaseUrl -eq $databaseUrl -or $testDatabaseUrl -notmatch '/supplydesk_test(?:\?.*)?$') {
@@ -194,10 +310,13 @@ if ($testDatabaseUrl -eq $databaseUrl -or $testDatabaseUrl -notmatch '/supplydes
 }
 
 $previousDatabaseUrl = $env:DATABASE_URL
+
 try {
     $env:DATABASE_URL = $testDatabaseUrl
+
     Set-Location .\backend
     npm run db:migrate
+
     if ($LASTEXITCODE -ne 0) {
         throw "Migration of supplydesk_test failed."
     }
@@ -210,53 +329,38 @@ try {
 }
 ```
 
-Then run the tests from `backend/`:
+Then, from `backend/`:
 
 ```powershell
-npm ci
 npm test
 npm run typecheck
 npm run build
 ```
 
-The integration tests create uniquely named records and currently do not clean those records up after a run. They do not truncate tables or delete existing data. Repeated test runs may add more records to `supplydesk_test`.
+The integration suite creates uniquely named test records and does not truncate tables or delete existing data. Repeated runs may leave additional records in `supplydesk_test`.
 
-## API overview
+## Continuous integration
 
-The API is rooted at `/api`.
+The GitHub Actions workflow in `.github/workflows/ci.yml` runs on pushes and pull requests.
 
-| Area | Route examples | Purpose |
-|---|---|---|
-| Health | `GET /health`, `GET /health/ready` | Liveness and database readiness |
-| Dashboard | `GET /dashboard/summary` | Inventory metrics and recent activity |
-| Products | `GET /products`, `POST /products`, `GET /products/:id`, `PATCH /products/:id` | Product listing and maintenance |
-| Stock | `POST /products/:id/adjustments`, `GET /products/:id/movements` | Validated stock changes and movement history |
-| Suppliers | `GET /suppliers`, `POST /suppliers`, `GET /suppliers/:id`, `PATCH /suppliers/:id` | Supplier records and activation state |
-| Purchasing | `GET /purchase-orders`, `POST /purchase-orders`, `GET /purchase-orders/:id` | Purchase-order creation and lookup |
-| Order workflow | `POST /purchase-orders/:id/place`, `POST /purchase-orders/:id/cancel`, `POST /purchase-orders/:id/receipts` | Place/cancel orders and receive stock |
-| Receipt history | `GET /purchase-orders/:id/receipts` | Receipt history for an order |
+- **Frontend job:** dependency installation, ESLint, and production build.
+- **Backend job:** starts a temporary PostgreSQL 17 service, applies migrations, runs integration tests, checks TypeScript, and builds the backend.
 
-Request validation and database constraints enforce important business rules such as unique SKUs, non-negative inventory, and receipt quantities that do not exceed the outstanding order quantity.
+CI uses its own disposable database and credentials. It does not require your local `.env` file.
 
-## CI (GitHub Actions)
+Check the [SupplyDesk Actions page](https://github.com/adigajendran-ui/SupplyDesk/actions) for the status of the latest commit.
 
-`.github/workflows/ci.yml` defines two jobs for pushes and pull requests:
+## Current limitations and production hardening
 
-- **Frontend checks:** `npm ci`, lint, and production build.
-- **Backend tests:** starts a temporary PostgreSQL 17 service, applies migrations, runs integration tests, type-checks, and builds the backend.
+SupplyDesk is a portfolio project, not yet a production-ready inventory service. Before public deployment or use with sensitive business data, it still needs:
 
-The CI workflow uses a disposable PostgreSQL database and does not need your local `.env` file. Verify the workflow's result in the **Actions** tab after pushing the repository to GitHub.
-
-## Current limitations and next steps
-
-SupplyDesk is not production-ready yet. Before deploying it publicly or using it with sensitive or real business data, the project needs at least:
-
-- Authentication and server-side authorization/role checks
-- Security and dependency review, including authorization and input-validation tests
-- A production deployment configuration with managed secrets, TLS, backups, and operational monitoring
-- Broader test coverage for supplier and purchase-order edge cases, concurrency, and error paths
-- A dedicated, paginated inventory-wide stock movement endpoint to avoid fetching movement history separately for each product
+- A security review of authentication, authorization, session handling, CSRF behavior, and account lifecycle management.
+- Production configuration for HTTPS, secure secrets, database backups, monitoring, and deployment networking.
+- A distributed login rate-limit store if multiple backend instances are used.
+- Additional tests for supplier and purchase-order edge cases, concurrency, and error handling.
+- A dedicated paginated endpoint for inventory-wide stock movements to reduce repeated per-product requests.
+- User-interface refinements, screenshots, and a documented demo experience.
 
 ## License
 
-No license has been added yet. Unless a license is added to the repository, do not assume others have permission to reuse or redistribute this code.
+No license has been added yet. Unless a license is added to the repository, others should not assume they have permission to reuse or redistribute the code.
